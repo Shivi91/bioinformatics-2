@@ -1,4 +1,6 @@
 import collections
+import random
+import sys
 
 ### replication origin ###
 
@@ -291,7 +293,9 @@ def find_median( dnas, k ):
 def profile_most_probable( text, k, probabilities, prob_map = { 'A': 0, 'C': 1, 'G': 2, 'T': 3 } ):
   '''
 >>> profile_most_probable( 'ACCTGTTTATTGCCTAAGTTCCGAACAAACCCAATATAGCCCGAGGGCCT', 5, ( ( 0.2, 0.4, 0.3, 0.1 ), ( 0.2, 0.3, 0.3, 0.2 ), (0.3, 0.1, 0.5, 0.1 ), (0.2, 0.5, 0.2, 0.1 ), (0.3, 0.1, 0.4, 0.2) ) )
-(['CCGAG'], 0.0048)
+(['CCGAG'], 0.0048000000000000004)
+>>> profile_most_probable( 'ATCCGACAGAGGCAG', 15, [[0.375, 0.16666666666666666, 0.16666666666666666, 0.2916666666666667], [0.4166666666666667, 0.20833333333333334, 0.125, 0.25], [0.2916666666666667, 0.25, 0.20833333333333334, 0.25], [0.25, 0.20833333333333334, 0.20833333333333334, 0.3333333333333333], [0.20833333333333334, 0.3333333333333333, 0.25, 0.20833333333333334], [0.2916666666666667, 0.16666666666666666, 0.25, 0.2916666666666667], [0.3333333333333333, 0.3333333333333333, 0.16666666666666666, 0.16666666666666666], [0.25, 0.25, 0.16666666666666666, 0.3333333333333333], [0.2916666666666667, 0.20833333333333334, 0.25, 0.25], [0.25, 0.375, 0.25, 0.125], [0.20833333333333334, 0.20833333333333334, 0.2916666666666667, 0.2916666666666667], [0.20833333333333334, 0.25, 0.20833333333333334, 0.3333333333333333], [0.4166666666666667, 0.25, 0.08333333333333333, 0.25], [0.25, 0.375, 0.25, 0.125], [0.16666666666666666, 0.2916666666666667, 0.2916666666666667, 0.25]] )
+(['ATCCGACAGAGGCAG'], 2.0540357709176262e-09)
   '''
   best = None
   best_score = None
@@ -299,8 +303,11 @@ def profile_most_probable( text, k, probabilities, prob_map = { 'A': 0, 'C': 1, 
     candidate = text[p:p+k]
     current = 1.0
     for x in xrange( 0, k ):
-      current *= probabilities[x][prob_map[candidate[x]]]
-    current = round( current, 6 )
+      next_probability = probabilities[x][prob_map[candidate[x]]]
+      current *= next_probability
+      #print "prob", next_probability, " acc", current
+    #print "before rounding", current
+    #current = round( current, 6 )
     #print candidate, "", current
     if best_score is None or current > best_score:
       best = [ candidate ]
@@ -412,6 +419,115 @@ def profile_greedy( dnas, k, smooth_laplace=False ):
       #print "best", motifs, best_score
   return ( best, best_score )      
 
+def profile_randomized_repeated( dnas, k, iterations=1000, smooth_laplace=False ):
+  '''
+>>> profile_randomized_repeated( ( 'CGCCCCTCTCGGGGGTGTTCAGTAAACGGCCA','GGGCGAGGTATGTGTAAGTGCCAAGGTGCCAG','TAGTACCGAGACCGAAAGAAGTATACAGGCGT','TAGATCAAGTTTCAGGTGCACGTCGGTGAACC','AATCCACCAGCTCCACGTGCAATGTTGGCCTA'), 8, iterations=1000, smooth_laplace=True )[1]
+9
+  '''
+  best = None
+  for i in xrange(0, iterations):
+    cand = profile_randomized( dnas, k, smooth_laplace=smooth_laplace )
+    if best is None or cand[1] < best[1]:
+      best = cand
+  return best
+
+def profile_randomized( dnas, k, initial_motifs=None, smooth_laplace=False ):
+  # choose a random initial set of kmers as the best
+  if initial_motifs is None:
+    best = []
+    for dna in dnas:
+      pos = random.randint( 0, len(dna) - k )
+      motif = dna[pos:pos+k]
+      best.append( motif )
+  else:
+    best = initial_motifs
+  best_score = hamming( best )
+  #print "initial best is", best_score, "", best 
+  initial_best_score = best_score
+  while True:
+    new_motifs = []
+    profile = build_probability_profile( best, smooth_laplace=smooth_laplace )
+    #print profile
+    for dna_i in xrange(0, len(dnas)):
+      #best_excluding_current = best[0:dna_i] + best[dna_i+1:len(dnas)]
+      #profile = build_probability_profile( best, smooth_laplace=smooth_laplace )
+      dna = dnas[dna_i]
+      most_probable = profile_most_probable( dna, k, profile )
+      #print "most_probable for", dna, " given", profile, " is", most_probable
+      new_motifs.append( most_probable[0][0] )
+    new_motifs_score = hamming( new_motifs )
+    #print "new score", new_motifs_score, " new motifs", new_motifs
+    if new_motifs_score < best_score: # improvement
+      best_score = new_motifs_score
+      best = new_motifs
+      #print ( best, best_score )
+    else: # no improvement
+      if best_score < initial_best_score:
+        #print "improvement from", initial_best_score, " to", best_score
+        pass
+      return ( best, best_score )
+
+def motif_gibbs_repeated( dnas, k, iterations=100, starts=50, smooth_laplace=True ):
+  '''
+>>> motif_gibbs_repeated( ('CGCCCCTCTCGGGGGTGTTCAGTAAACGGCCA','GGGCGAGGTATGTGTAAGTGCCAAGGTGCCAG','TAGTACCGAGACCGAAAGAAGTATACAGGCGT','TAGATCAAGTTTCAGGTGCACGTCGGTGAACC','AATCCACCAGCTCCACGTGCAATGTTGGCCTA'), 8, smooth_laplace=True )[1]
+9
+  '''
+  best = None
+  for i in xrange(0, starts):
+    cand = motif_gibbs( dnas, k, iterations=iterations, smooth_laplace=smooth_laplace )
+    if best is None or cand[1] < best[1]:
+      best = cand
+      print "iteration", i, "", best
+  return best
+  
+def calculate_kmer_probabilities( text, k, profile, prob_map = { 'A': 0, 'C': 1, 'G': 2, 'T': 3 } ):
+  '''
+>>> calculate_kmer_probabilities( 'ACCTGTTTATTGCCTAAGTTCCGAACAAACCCAATATAGCCCGAGGGCCT', 5, ( ( 0.2, 0.4, 0.3, 0.1 ), ( 0.2, 0.3, 0.3, 0.2 ), (0.3, 0.1, 0.5, 0.1 ), (0.2, 0.5, 0.2, 0.1 ), (0.3, 0.1, 0.4, 0.2) ) )
+[0.00024000000000000003, 0.00048000000000000007, 0.0008000000000000003, 6.000000000000001e-05, 0.00018, 8.000000000000003e-05, 0.00012000000000000004, 8.000000000000003e-05, 8.000000000000003e-05, 0.0005000000000000001, 0.00030000000000000003, 0.00027, 0.00072, 0.0019200000000000007, 0.0002400000000000001, 0.00040000000000000013, 6.000000000000001e-05, 0.00030000000000000003, 0.00040000000000000013, 0.00018, 0.0036, 0.00072, 0.0026999999999999997, 0.00024000000000000006, 0.00108, 0.0004800000000000002, 0.0006000000000000002, 0.00020000000000000006, 0.0009, 0.00072, 0.00144, 0.0007200000000000002, 0.00016000000000000007, 0.0003600000000000001, 0.00016000000000000007, 0.0002400000000000001, 0.0005000000000000001, 0.00030000000000000003, 0.0018, 0.00072, 0.0048000000000000004, 0.00288, 0.0024000000000000002, 0.0006000000000000001, 0.00225, 0.0009]
+  '''
+  probs = []
+  for p in xrange( 0, len(text) - k +1 ):
+    candidate = text[p:p+k]
+    current = 1.0
+    for x in xrange( 0, k ):
+      next_probability = profile[x][prob_map[candidate[x]]]
+      current *= next_probability
+    probs.append( current )
+  return probs
+
+def choose_random( probabilities ):
+  r = random.random()
+  s = sum( probabilities )
+  t = 0.0
+  for idx in xrange(0, len(probabilities)):
+    nxt = t + probabilities[idx] / s
+    if t <= r < nxt:
+      return idx
+    t = nxt
+
+def motif_gibbs( dnas, k, iterations=100, smooth_laplace=False ):
+  # random initial motifs
+  best_motifs = []
+  for dna in dnas:
+    pos = random.randint( 0, len(dna) - k )
+    motif = dna[pos:pos+k]
+    best_motifs.append( motif )
+  best_score = hamming( best_motifs )
+  for iteration in xrange(0, iterations):
+    dna_i = random.randint( 0, len(dnas) - 1 ) # any dna
+    best_excluding_current = best_motifs[0:dna_i] + best_motifs[dna_i+1:len(dnas)]
+    profile = build_probability_profile( best_excluding_current, smooth_laplace=smooth_laplace )
+    candidate_motifs = best_motifs[:]
+    kmer_probabilities = calculate_kmer_probabilities( dnas[dna_i], k, profile )
+    kmer_position = choose_random( kmer_probabilities )
+    candidate_motifs[dna_i] = dnas[dna_i][kmer_position: kmer_position + k]
+    candidate_score = hamming( candidate_motifs )
+    if candidate_score < best_score:
+      best_score = candidate_score
+      best_motifs = candidate_motifs
+  # done
+  return ( best_motifs, best_score )
+    
 if __name__ == "__main__":
   import doctest
   doctest.testmod()
