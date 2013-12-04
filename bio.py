@@ -1,4 +1,5 @@
 import collections
+import math
 import random
 import sys
 
@@ -408,7 +409,7 @@ def profile_greedy( dnas, k, smooth_laplace=False ):
           best_motif_prob = motif_probability
           #print "best is", best_motif, "", best_motif_prob
       if best_motif is None:
-        print "oh no!"
+        print "ERROR: oh no!"
       else:
         motifs.append( best_motif )
       #print "motifs", motifs
@@ -477,7 +478,7 @@ def motif_gibbs_repeated( dnas, k, iterations=100, starts=50, smooth_laplace=Tru
     cand = motif_gibbs( dnas, k, iterations=iterations, smooth_laplace=smooth_laplace )
     if best is None or cand[1] < best[1]:
       best = cand
-      print "iteration", i, "", best
+      #print "iteration", i, "", best
   return best
   
 def calculate_kmer_probabilities( text, k, profile, prob_map = { 'A': 0, 'C': 1, 'G': 2, 'T': 3 } ):
@@ -527,7 +528,360 @@ def motif_gibbs( dnas, k, iterations=100, smooth_laplace=False ):
       best_motifs = candidate_motifs
   # done
   return ( best_motifs, best_score )
-    
+
+##### string reconstruction #####
+
+def kmers( dna, k ):
+  '''
+>>> kmers( 'CAATCCAAC', 5 )
+['AATCC', 'ATCCA', 'CAATC', 'CCAAC', 'TCCAA']
+  '''
+  s = set()
+  for i in xrange(0, len(dna) - k + 1 ):
+    s.add( dna[i: i+k] )
+  result = list(s)
+  result.sort()
+  return result
+
+def adjacent( k1, k2 ):
+  '''
+>>> adjacent( 'abc', 'bcd' )
+True
+  '''
+  return k1[1:] == k2[:-1]
+
+def overlap( kmers ):
+  '''
+>>> overlap( ( 'ATGCG','GCATG','CATGC','AGGCA','GGCAT' ) )
+{'AGGCA': ['GGCAT'], 'GGCAT': ['GCATG'], 'GCATG': ['CATGC'], 'CATGC': ['ATGCG']}
+  '''
+  adjacencies = dict()
+  for kmer_i in xrange(0, len(kmers)):
+    for kmer_j in xrange(0, len(kmers)):
+      if adjacent( kmers[kmer_i], kmers[kmer_j] ):
+        if kmers[kmer_i] not in adjacencies:
+          adjacencies[kmers[kmer_i]] = []
+        adjacencies[kmers[kmer_i]].append( kmers[kmer_j] )
+  return adjacencies
+
+def debruijn_text( dna, k ):
+  '''
+>>> debruijn_text( 'AAGATTCTCTAC', 4 )
+{'AAG': ['AGA'], 'TCT': ['CTC', 'CTA'], 'GAT': ['ATT'], 'AGA': ['GAT'], 'ATT': ['TTC'], 'CTA': ['TAC'], 'CTC': ['TCT'], 'TTC': ['TCT']}
+  '''
+  adjacencies = dict()
+  node = k - 1
+  for i in xrange(0, len(dna)-node):
+    src = dna[i:i+node]
+    dest = dna[i+1:i+node+1]
+    if src not in adjacencies:
+      adjacencies[src] = []
+    adjacencies[src].append(dest)
+  return adjacencies
+
+def debruijn( kmers ):
+  '''
+>>> debruijn( ('GAGG','GGGG','GGGA','CAGG','AGGG','GGAG') )
+{'GAG': ['AGG'], 'AGG': ['GGG'], 'GGG': ['GGG', 'GGA'], 'CAG': ['AGG'], 'GGA': ['GAG']}
+  '''
+  adjacencies = dict()
+  for kmer in kmers:
+    src = kmer[:-1]
+    dest = kmer[1:]
+    if src not in adjacencies:
+      adjacencies[src] = []
+    adjacencies[src].append(dest)
+  return adjacencies
+
+def find_last( needle, haystack ):
+  '''
+>>> find_last( 'a', [ 'a', 'z', 'a', 'z' ] )
+2
+>>> find_last( 'z', [ 'a', 'z', 'a', 'z' ] )
+3
+  '''
+  return (len(haystack) - 1) - haystack[::-1].index(needle)
+
+def has_outgoing( node, out_links ):
+  return node in out_links
+
+def has_incoming( node, out_links ):
+  '''
+>>> has_incoming( 'a', { 'a': ['b'], 'b': ['a'] } )
+True
+>>> has_incoming( 'a', { 'a': ['b'], 'b': ['c'] } )
+False
+  '''
+  for n in out_links:
+    for e in out_links[n]:
+      if e == node:
+        return True
+  return False
+
+def euler_cycle( out_links ):
+  '''
+>>> euler_cycle( { '0': ['3'], '1': ['0'], '2': ['1', '6'], '3': ['2'], '4': ['2'], '5': ['4'], '6': ['5', '8'], '7': ['9'], '8': ['7'], '9': ['6'] } )
+['1', '0', '3', '2', '6', '8', '7', '9', '6', '5', '4', '2', '1']
+>>> euler_cycle( { 'a': ['b'], 'b': ['d', 'c'], 'c': ['a'], 'd': ['e'], 'e': ['f', 'b'], 'f': ['e'] } )
+['e', 'b', 'c', 'a', 'b', 'd', 'e', 'f', 'e']
+>>> euler_cycle( { 'a': ['a', 'a'] } )
+['a', 'a', 'a']
+>>> euler_cycle( { 'a': ['b'], 'b': ['a', 'c', 'e'], 'c': ['d'], 'd': ['b'], 'e': ['f'], 'f': ['b'] } )
+['a', 'b', 'e', 'f', 'b', 'c', 'd', 'b', 'a']
+>>> euler_cycle( { 'a': ['b', 'e'], 'b': ['a', 'c', 'd', 'e'], 'c': ['d'], 'd': ['a', 'b'], 'e': ['b', 'f'], 'f': ['b'] } )
+['a', 'e', 'f', 'b', 'e', 'b', 'd', 'b', 'c', 'd', 'a', 'b', 'a']
+>>> euler_cycle( { '1': ['2'], '2': ['3', '4'], '3': ['1'], '4': ['2'] } )
+['1', '2', '4', '2', '3', '1']
+>>> euler_cycle( { '1': ['2'], '2': ['3'], '3': ['1', '4'], '4': ['3'] } )
+['1', '2', '3', '4', '3', '1']
+  '''
+  #print "euler_cycle for", out_links
+  overall = []
+  current = None
+  while len(out_links) > 0: # unexplored edges remain
+    node = None
+    if current is None: # first cycle
+      node = out_links.keys()[0] 
+    else:
+      # pick an unexplored node from the overall cycle
+      for i in xrange(0, len(overall)):
+        if has_outgoing( overall[i], out_links ) and has_incoming( overall[i], out_links ):
+          node = overall[i]
+          break
+    if node is None:
+      print "ERROR: oh no!"
+    # explore  
+    current = []
+    while True:
+      #print "node is", node
+      if node not in out_links or len( out_links[node] ) == 0:
+        #print "finished cycle"
+        if len(current) == 0:
+          print "ERROR: didn't make a cycle", node
+        if node != current[0]:
+          print "ERROR: didn't make a cycle with", current, " last node", node
+        break # end of cycle
+      else:
+        current.append( node ) 
+        next_node = out_links[node].pop() # removes edge
+        if len( out_links[node] ) == 0: # removed last out edge
+          #print "removing", node
+          del out_links[node]
+        node = next_node
+      #print "current:", current
+    # end of cycle - add to overall
+    #print "calculating new overall"
+    if len(overall) == 0:
+      overall = current
+    else:
+      # e.g. overall = a b c current = b d e => b c a b d e
+      new_start = find_last( current[0], overall )
+      #new_start = overall.index( current[0] )
+      overall = overall[new_start:] + overall[:new_start] + current
+    #print "overall:", overall
+  # complete loop
+  overall.append( overall[0] )
+  return overall
+
+def in_links( out_links ):
+  '''
+>>> in_links( { '1': ['2', '3'], '2': ['3'], '3': ['2'] } )
+{'3': ['1', '2'], '2': ['1', '3']}
+  '''
+  result = {}
+  for src, dests in out_links.items():
+    for dest in dests:
+      if dest not in result:
+        result[dest] = []
+      result[dest].append(src)
+  return result
+
+def unbalanced( in_links, out_links ):
+  '''
+>>> out_links = { '1': ['2'], '2': ['3'] }
+>>> unbalanced( in_links( out_links ), out_links )
+['1', '3']
+  '''
+  result = set()
+  for node, edges in out_links.items():
+    if node in in_links:
+      in_links_count = len(in_links[node])
+    else:
+      in_links_count = 0
+    if len( edges ) != in_links_count:
+      result.add( node )
+
+  # add nodes with no outgoing links
+  for node, edges in in_links.items():
+    if node not in out_links: # not already checked
+      result.add( node )
+
+  return list(result)
+
+def complete_euler_path( incoming, outgoing, ends ):
+  '''
+  adds the edge to outgoing
+  '''
+  if len(ends) != 2:
+    raise Exception( 'Too many unbalanced nodes: %s' % ends )
+  if ends[0] not in incoming or ends[1] not in outgoing:
+    start = ends[1]
+    end = ends[0]
+  elif ends[1] not in incoming or ends[0] not in outgoing:
+    start = ends[0]
+    end = ends[1]
+  else:
+    net_incoming_0 = len(incoming[ends[0]])-len(outgoing[ends[0]])
+    net_incoming_1 = len(incoming[ends[1]])-len(outgoing[ends[1]])
+    if net_incoming_0 > net_incoming_1:
+      start = ends[0]
+      end = ends[1]
+    else:
+      start = ends[1]
+      end = ends[0]
+
+  if start not in outgoing:
+    outgoing[start] = []
+  outgoing[start].append( end )
+  return ( start, end )
+ 
+def euler_path( outgoing ):
+  '''
+>>> euler_path( { '0': ['2'], '1': ['3'], '2': ['1'], '3': ['0', '4'], '6': ['3', '7'], '7': ['8'], '8': ['9'], '9': ['6'] } )
+['6', '7', '8', '9', '6', '3', '0', '2', '1', '3', '4']
+  '''
+  # find unbalanced
+  incoming = in_links( outgoing )
+  ends = unbalanced( incoming, outgoing )
+  start, end = complete_euler_path( incoming, outgoing, ends )
+
+  # find cycle
+  cycle = euler_cycle( outgoing )
+  cycle = cycle[:-1] # remove repeated
+  new_start_i = cycle.index( end ) # end of link is where path starts
+  
+  path = cycle[new_start_i:] + cycle[:new_start_i]
+  return path
+
+def reconstruct( edges ):
+  '''
+>>> reconstruct( { 'CTT': ['TTA'], 'ACC': ['CCA'], 'TAC': ['ACC'], 'GGC': ['GCT'], 'GCT': ['CTT'], 'TTA': ['TAC'] } )
+'GGCTTACCA'
+  '''
+  path = euler_path( edges )
+  result = ''.join( [ node[0] for node in path ] )
+  result += path[-1][1:]
+  return result
+
+def universal_string( k ):
+  '''
+>>> universal_string( 4 )
+'0001011110100110'
+  '''
+  max_value = int( math.pow( 2, k-1 ) )
+  nodes = {}
+  node_string = '{0:0%ib}' % (k-1)
+  # add nodes
+  for n in xrange(0, max_value):
+    node_name = node_string.format( n )
+    nodes[node_name] = []
+  # add edges
+  for n in xrange(0, max_value):
+    src = node_string.format( n )
+    target_0 = src[1:] + '0'
+    target_1 = src[1:] + '1'
+    nodes[src].append( target_0 )
+    nodes[src].append( target_1 )
+  #print "network", nodes
+  # solve
+  cycle = euler_cycle( nodes )
+  cycle = cycle[:-1] # remove repeat
+  #print "solution", cycle
+  result = ''.join( [ node[0] for node in cycle ] )
+  return result
+
+def reconstruct_paired_debruijn( k, edges ):
+  '''
+>>> reconstruct_paired_debruijn( 2, [ [ 'GAGA', 'TTGA' ], ['TCGT', 'GATG'], ['CGTG', 'ATGT'], ['TGGT', 'TGAG'], ['GTGA', 'TGTT'], ['GTGG', 'GTGA'], ['TGAG', 'GTTG'], ['GGTC', 'GAGA'], ['GTCG', 'AGAT' ] ] ) 
+'GTGGTCGTGAGATGTTGA'
+  '''  
+  outgoing = {}
+  for pair in edges:
+    src_node = '%s|%s' % ( pair[0][:-1], pair[1][:-1] )
+    dest_node = '%s|%s' % ( pair[0][1:], pair[1][1:] )
+
+    if src_node not in outgoing:
+      outgoing[src_node] = []
+    outgoing[src_node].append( dest_node )
+
+  #print "network", outgoing
+  path = euler_path( outgoing )
+  #print "solution", path
+
+  prefix = ''.join( [ node[0] for node in path ] )
+  prefix += path[-1].split('|')[0][1:]
+
+  suffix = ''.join( [ node.split('|')[1][0] for node in path ] )
+  suffix += path[-1].split('|')[1][1:]
+  #print prefix, suffix
+
+  position_difference = k + path[0].index('|')
+  result = prefix + suffix[-position_difference-1:]
+  return result
+
+def non_branching_nodes( outgoing, incoming ):
+  result = set()
+  for node in outgoing:
+    if len(outgoing[node]) == 1 and node in incoming and len(incoming[node]) == 1:
+      result.add(node)
+  return result
+
+def contigs( outgoing ):
+  '''
+>>> contigs( { 'a': ['t', 'g'], 't': ['g'] } )
+[['a', 'g'], ['a', 't', 'g']]
+>>> contigs( {'AG': ['GA'], 'CA': ['AT'], 'GG': ['GA'], 'AT': ['TG'], 'GA': ['AT'], 'TG': ['GT', 'GG']} )
+[['AT', 'TG'], ['TG', 'GT'], ['CA', 'AT'], ['GA', 'AT'], ['AG', 'GA'], ['TG', 'GG', 'GA']]
+  '''
+  incoming = in_links( outgoing )
+  non_branching = non_branching_nodes( outgoing, incoming )
+  result = []
+  for dest in incoming:
+    if dest not in non_branching:
+      for src in incoming[dest]:
+        if src not in non_branching: # 2 connected non-branching nodes
+          result.append( [ src, dest ] )
+  while len(non_branching) > 0: # finds all contigs containing a non-branching node
+    candidate = non_branching.pop()
+    current_path = [ candidate ]
+    # explore incoming
+    incoming_candidate = candidate
+    while True:
+      incoming_candidate = incoming[incoming_candidate][0] 
+      current_path = [ incoming_candidate ] + current_path
+      if incoming_candidate in non_branching:
+        non_branching.remove( incoming_candidate )
+      else:
+        break
+    # explore outgoing
+    outgoing_candidate = candidate
+    while True:
+      outgoing_candidate = outgoing[outgoing_candidate][0] 
+      current_path = current_path + [ outgoing_candidate ] 
+      if outgoing_candidate in non_branching:
+        non_branching.remove( outgoing_candidate )
+      else:
+        break
+    result.append( current_path )
+  return result
+
+def to_string( path ):
+  '''
+>>> to_string( ['ab', 'bc', 'cd'] )
+'abcd'
+  '''
+  return ''.join( [ x[0] for x in path ] ) + path[-1][1:]
+
 if __name__ == "__main__":
   import doctest
   doctest.testmod()
